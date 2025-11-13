@@ -3,6 +3,10 @@ require('dotenv').config();
 const express = require('express');
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcrypt'); //เพิ่ม bcrypt
+const jwt = require('jsonwebtoken'); // สำหรับสร้าง token
+const verifyToken = require('./middleware/auth'); // middleware ตรวจสอบ token (เราจะสร้างไฟล์นี้)
+const SECRET_KEY = process.env.JWT_SECRET; // อ่านค่า secret จาก .env
+
 const app = express();
 
 app.use(express.json());
@@ -25,8 +29,8 @@ app.get('/ping', async (req, res) => {
   }
 });
 
-// GET users
-app.get('/users', async (req, res) => {
+// GET users (protected)
+app.get('/users', verifyToken, async (req, res) => {
   try {
     const [rows] = await db.query('SELECT id, firstname, fullname, lastname FROM tbl_users');
     res.json(rows);
@@ -35,8 +39,8 @@ app.get('/users', async (req, res) => {
   }
 });
 
-// GET user by id
-app.get('/users/:id', async (req, res) => {
+// GET user by id (protected)
+app.get('/users/:id', verifyToken, async (req, res) => {
   const { id } = req.params;
   try {
     const [rows] = await db.query('SELECT id, firstname, fullname, lastname FROM tbl_users WHERE id = ?', [id]);
@@ -46,6 +50,7 @@ app.get('/users/:id', async (req, res) => {
     res.status(500).json({ error: 'Query failed' });
   }
 });
+
 
 //POST: เพิ่มผู้ใช้ใหม่ พร้อม hash password
 app.post('/users', async (req, res) => {
@@ -113,6 +118,32 @@ app.delete('/users/:id', async (req, res) => {
     res.status(500).json({ error: 'Delete failed' });
   }
 });
+// POST: เข้าสู่ระบบ (Login)
+app.post('/login', async (req, res) => {
+  const { username, password } = req.body; // ใช้ fullname เป็น username ก็ได้ ถ้าชื่อใน DB คือ fullname
+
+  try {
+    const [rows] = await db.query('SELECT * FROM tbl_users WHERE fullname = ?', [username]);
+    if (rows.length === 0) return res.status(401).json({ error: 'User not found' });
+
+    const user = rows[0];
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(401).json({ error: 'Invalid password' });
+
+    // สร้าง JWT token
+    const token = jwt.sign(
+      { id: user.id, fullname: user.fullname, lastname: user.lastname },
+      SECRET_KEY,
+      { expiresIn: '1h' } // อายุ token 1 ชั่วโมง
+    );
+
+    res.json({ message: 'Login successful', token });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
