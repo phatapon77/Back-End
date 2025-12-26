@@ -1,181 +1,153 @@
-require('dotenv').config();
-
 const express = require('express');
-const mysql = require('mysql2/promise');
-const bcrypt = require('bcrypt');
+const bodyParser = require('body-parser');
 const cors = require('cors');
+const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const verifyToken = require('./middleware/auth'); // ✅ ตรวจสอบ middleware
+const mysql = require('mysql2/promise');
+require('dotenv').config();
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(bodyParser.json());
 
-// =====================
-// DB Pool
-// =====================
+// 1. เชื่อมต่อ Database
 const db = mysql.createPool({
-  host: process.env.DB_HOST,
-  port: parseInt(process.env.DB_PORT), // ต้องเป็นตัวเลข
-  user: process.env.DB_USER,
-  password: process.env.DB_PASS,
-  database: process.env.DB_NAME,
+    host: process.env.DB_HOST,
+    port: process.env.DB_PORT || 3306,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
 });
 
-// =====================
-// Secret Key JWT
-// =====================
-const SECRET_KEY = process.env.JWT_SECRET;
+// เช็คการเชื่อมต่อ
+db.getConnection()
+    .then(conn => {
+        console.log('✅ Database Connected Successfully!');
+        conn.release();
+    })
+    .catch(err => {
+        console.error('❌ Database Connection Failed:', err);
+    });
 
-// =====================
-// Route หลัก
-// =====================
-app.get('/', (req, res) => {
-  res.send('🚀 API Server is running! Welcome to Node.js + MySQL + JWT backend.');
-});
-
-// =====================
-// Test DB
-// =====================
-app.get('/ping', async (req, res) => {
-  try {
-    const [rows] = await db.query('SELECT NOW() AS now');
-    res.json({ status: 'ok', time: rows[0].now });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Database error' });
-  }
-});
-
-// =====================
-// LOGIN
-// =====================
-app.post('/login', async (req, res) => {
-  const { username, password } = req.body;
-
-  try {
-    const [rows] = await db.query('SELECT * FROM tbl_users WHERE username = ?', [username]);
-    if (rows.length === 0)
-      return res.status(401).json({ error: 'User not found' });
-
-    const user = rows[0];
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch)
-      return res.status(401).json({ error: 'Invalid password' });
-
-    const token = jwt.sign(
-      {
-        id: user.id,
-        firstname: user.firstname,
-        fullname: user.fullname,
-        lastname: user.lastname,
-        username: user.username,
-      },
-      SECRET_KEY,
-      { expiresIn: '1h' }
-    );
-
-    res.json({ message: 'Login successful', token });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Login failed' });
-  }
-});
-
-// =====================
-// CRUD Users
-// =====================
-
-// GET all users
-app.get('/users', verifyToken, async (req, res) => {
-  try {
-    const [rows] = await db.query('SELECT id, firstname, fullname, lastname, username, status FROM tbl_users');
-    res.json(rows);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Query failed' });
-  }
-});
-
-// GET user by id
-app.get('/users/:id', verifyToken, async (req, res) => {
-  const { id } = req.params;
-  try {
-    const [rows] = await db.query(
-      'SELECT id, firstname, fullname, lastname, username, status FROM tbl_users WHERE id = ?',
-      [id]
-    );
-    if (rows.length === 0) return res.status(404).json({ message: 'User not found' });
-    res.json(rows[0]);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Query failed' });
-  }
-});
-
-// POST new user
-app.post('/users', async (req, res) => {
-  const { firstname, fullname, lastname, username, password, status } = req.body;
-
-  try {
-    if (!password) return res.status(400).json({ error: 'Password is required' });
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const [result] = await db.query(
-      'INSERT INTO tbl_users (firstname, fullname, lastname, username, password, status) VALUES (?, ?, ?, ?, ?, ?)',
-      [firstname, fullname, lastname, username, hashedPassword, status]
-    );
-
-    res.json({ id: result.insertId, firstname, fullname, lastname, username, status });
-  } catch (err) {
-    console.error('❌ Insert Error:', err);
-    res.status(500).json({ error: 'Insert failed' });
-  }
-});
-
-// PUT update user
-app.put('/users/:id', verifyToken, async (req, res) => {
-  const { id } = req.params;
-  const { firstname, fullname, lastname, username, password, status } = req.body;
-
-  try {
-    let query = 'UPDATE tbl_users SET firstname = ?, fullname = ?, lastname = ?, username = ?, status = ?';
-    const params = [firstname, fullname, lastname, username, status];
-
-    if (password) {
-      const hashedPassword = await bcrypt.hash(password, 10);
-      query += ', password = ?';
-      params.push(hashedPassword);
+// Middleware เช็ค Token
+const isAuth = (req, res, next) => {
+    const authHeader = req.get('Authorization');
+    if (!authHeader) return res.status(401).json({ message: 'Not authenticated.' });
+    const token = authHeader.split(' ')[1];
+    if (!token) return res.status(401).json({ message: 'Not authenticated.' });
+    try {
+        const decodedToken = jwt.verify(token, process.env.JWT_SECRET);
+        req.userId = decodedToken.userId;
+        next();
+    } catch (err) {
+        return res.status(500).json({ message: 'Token invalid' });
     }
+};
 
-    query += ' WHERE id = ?';
-    params.push(id);
+// ================= ROUTES =================
 
-    const [result] = await db.query(query, params);
-    if (result.affectedRows === 0) return res.status(404).json({ message: 'User not found' });
-
-    res.json({ message: 'User updated successfully' });
-  } catch (err) {
-    console.error('❌ Update Error:', err);
-    res.status(500).json({ error: 'Update failed' });
-  }
+// 1. Register (สมัครสมาชิก)
+app.post('/auth/register', async (req, res) => {
+    const { username, password, fullname, address, phone, email } = req.body;
+    try {
+        const hashedPassword = await bcrypt.hash(password, 12);
+        // บันทึกลงตารางจริง tbl_customers
+        await db.execute(
+            'INSERT INTO tbl_customers (username, password, fullname, address, phone, email) VALUES (?, ?, ?, ?, ?, ?)',
+            [username, hashedPassword, fullname, address, phone, email]
+        );
+        res.status(201).json({ message: 'User registered!' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Register failed', error: err.message });
+    }
 });
 
-// DELETE user
-app.delete('/users/:id', verifyToken, async (req, res) => {
-  const { id } = req.params;
-  try {
-    const [result] = await db.query('DELETE FROM tbl_users WHERE id = ?', [id]);
-    if (result.affectedRows === 0) return res.status(404).json({ message: 'User not found' });
-    res.json({ message: 'User deleted successfully' });
-  } catch (err) {
-    console.error('❌ Delete Error:', err);
-    res.status(500).json({ error: 'Delete failed' });
-  }
+// 2. Login (เข้าสู่ระบบ)
+app.post('/auth/login', async (req, res) => {
+    const { username, password } = req.body;
+    try {
+        // เช็คจากตารางจริง tbl_customers
+        const [rows] = await db.execute('SELECT * FROM tbl_customers WHERE username = ?', [username]);
+        if (rows.length === 0) return res.status(401).json({ message: 'User not found' });
+
+        const user = rows[0];
+        const isEqual = await bcrypt.compare(password, user.password);
+        if (!isEqual) return res.status(401).json({ message: 'Wrong password' });
+
+        const token = jwt.sign({ userId: user.id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '1h' });
+        res.status(200).json({ token: token, userId: user.id });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Login failed', error: err.message });
+    }
 });
 
-// =====================
-// Start Server
-// =====================
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Server running at http://localhost:${PORT}`));
+// 3. Get Customers (ดูลูกค้า)
+app.get('/customers', isAuth, async (req, res) => {
+    try {
+        // ดึงข้อมูลจาก View (v_customers) ตามรูปที่คุณส่งมา
+        const [customers] = await db.execute('SELECT * FROM v_customers'); 
+        res.status(200).json(customers);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Error fetching customers' });
+    }
+});
+
+// 4. Get Menus (ดูเมนู)
+app.get('/menus', async (req, res) => {
+    try {
+        // ดึงข้อมูลจาก View (v_menus)
+        const [menus] = await db.execute('SELECT * FROM v_menus');
+        res.status(200).json(menus);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Error fetching menus' });
+    }
+});
+
+// 5. Order (สั่งอาหาร)
+app.post('/orders', isAuth, async (req, res) => {
+    const { restaurant_id, menu_id, quantity } = req.body;
+    const customer_id = req.userId;
+    try {
+        // เช็คราคาจากเมนู
+        const [menuRows] = await db.execute('SELECT price FROM tbl_menus WHERE id = ?', [menu_id]);
+        if (menuRows.length === 0) return res.status(404).json({ message: 'Menu not found' });
+
+        const price = parseFloat(menuRows[0].price);
+        const total_price = price * quantity;
+
+        // บันทึกลงตารางจริง tbl_orders
+        await db.execute(
+            'INSERT INTO tbl_orders (customer_id, restaurant_id, menu_id, quantity, total_amount, order_status) VALUES (?, ?, ?, ?, ?, ?)',
+            [customer_id, restaurant_id, menu_id, quantity, total_price, 'Pending']
+        );
+        res.status(201).json({ message: 'Order placed!', total_amount: total_price });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Order failed', error: err.message });
+    }
+});
+
+// 6. Summary (ดูยอดรวม)
+app.get('/orders/summary', isAuth, async (req, res) => {
+    const customer_id = req.userId;
+    try {
+        // ดึงประวัติจาก View (v_orders)
+        const [results] = await db.execute('SELECT * FROM v_orders WHERE customer_id = ?', [customer_id]);
+        res.status(200).json(results);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Error fetching summary' });
+    }
+});
+
+const PORT = 3000;
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+});
